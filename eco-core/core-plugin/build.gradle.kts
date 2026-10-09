@@ -2,10 +2,15 @@ group = "com.willfp"
 version = rootProject.version
 
 dependencies {
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     compileOnly("io.papermc.paper:paper-api:1.21.8-R0.1-SNAPSHOT")
 }
 
 tasks {
+    test {
+        useJUnitPlatform()
+    }
     build {
         dependsOn(publishToMavenLocal)
     }

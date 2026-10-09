@@ -13,6 +13,7 @@ object CommandEcoArmor : PluginCommand(
     init {
         addSubcommand(CommandReload)
             .addSubcommand(CommandGive)
+            .addSubcommand(CommandDamage)
     }
 
     override fun onExecute(sender: CommandSender, args: List<String>) {

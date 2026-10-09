@@ -6,6 +6,7 @@ import com.willfp.ecoarmor.plugin
 import com.willfp.ecoarmor.sets.ArmorSlot.Companion.getSlot
 import com.willfp.ecoarmor.upgrades.Tier
 import com.willfp.ecoarmor.upgrades.Tiers
+import com.willfp.libreforge.isBrokenItem
 import com.willfp.libreforge.Holder
 import com.willfp.libreforge.ItemProvidedHolder
 import com.willfp.libreforge.ProvidedHolder
@@ -103,12 +104,13 @@ object ArmorUtils {
     fun getActiveHolders(entity: LivingEntity): Collection<ProvidedHolder> {
         val holders = mutableListOf<ProvidedHolder>()
 
-        val equipment = entity.equipment?.armorContents?.toList() ?: emptyList()
+        val equipment = entity.equipment?.armorContents?.toList()?.map { if (it.isBrokenItem) null else it } ?: emptyList()
 
         // Pre-compute set lookups once for all items to avoid repeated PDC reads
         val itemSets = equipment.map { item -> item?.let { getSetOnItem(it) } }
 
-        val fullSet = getSetOn(equipment, itemSets)
+        val partialSetsWorn = countPartialSets(itemSets)
+        val fullSet = firstCompleteArmorSet(partialSetsWorn) { it.setRequirements }
         val advanced = isWearingAdvanced(equipment, fullSet, itemSets)
 
         val set = if (fullSet != null) {
@@ -121,7 +123,6 @@ object ArmorUtils {
             holders.add(SimpleProvidedHolder(set))
         }
 
-        val partialSetsWorn = countPartialSets(itemSets)
         for ((partialSet, count) in partialSetsWorn) {
             val suppressedByFull = fullSet != null && partialSet == fullSet && partialSet.fullSetDisablesPartialSet
             if (suppressedByFull) continue
@@ -190,6 +191,7 @@ object ArmorUtils {
 
         for (i in equipment.indices) {
             val itemStack = equipment[i] ?: continue
+            if (itemStack.isBrokenItem) continue
             val set = itemSets[i] ?: continue
             val holder = set.getSpecificHolder(itemStack) ?: continue
             holders.add(holder)
@@ -206,7 +208,7 @@ object ArmorUtils {
      */
     @JvmStatic
     fun getSetOnEntity(entity: LivingEntity): ArmorSet? {
-        val equipment = entity.equipment?.armorContents?.toList() ?: return null
+        val equipment = entity.equipment?.armorContents?.toList()?.map { if (it.isBrokenItem) null else it } ?: return null
         return getSetOn(equipment)
     }
 
@@ -229,23 +231,10 @@ object ArmorUtils {
         return findFullSet(found)
     }
 
-    /**
-     * Get armor set from pre-computed per-item set lookups.
-     */
-    private fun getSetOn(items: List<ItemStack?>, itemSets: List<ArmorSet?>): ArmorSet? {
-        val found = itemSets.filterNotNull()
-        return findFullSet(found)
-    }
-
     private fun findFullSet(found: List<ArmorSet>): ArmorSet? {
         if (found.isEmpty()) return null
         val grouped = found.groupingBy { it }.eachCount()
-        for ((set, count) in grouped) {
-            if (count >= set.setRequirements) {
-                return set
-            }
-        }
-        return null
+        return firstCompleteArmorSet(grouped) { it.setRequirements }
     }
 
     /**
@@ -368,6 +357,13 @@ object ArmorUtils {
         tier: Tier
     ) {
         val meta = itemStack.itemMeta ?: return
+        val effDur = meta.persistentDataContainer.get(
+            plugin.namespacedKeyFactory.create("effective-durability"),
+            PersistentDataType.INTEGER
+        )
+        if (effDur != null && effDur > 0 && meta is org.bukkit.inventory.meta.Damageable) {
+            meta.setMaxDamage(effDur)
+        }
         setTierKey(meta, tier)
         val slot = getSlot(itemStack) ?: return
 

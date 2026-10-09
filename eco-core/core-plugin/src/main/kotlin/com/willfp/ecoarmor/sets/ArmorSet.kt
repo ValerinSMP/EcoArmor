@@ -223,12 +223,14 @@ class ArmorSet(
             plugin.namespacedKeyFactory.create("set"),
             PersistentDataType.STRING,
             id
-        ).writeMetaKey(
-            plugin.namespacedKeyFactory.create("effective-durability"),
-            PersistentDataType.INTEGER,
-            slotConfig.getInt("effectiveDurability")
         )
         val itemStack = builder.build()
+        val effDur = slotConfig.getIntOrNull("effectiveDurability") ?: 0
+        if (effDur > 0) {
+            val meta = itemStack.itemMeta as? org.bukkit.inventory.meta.Damageable
+            meta?.setMaxDamage(effDur)
+            itemStack.itemMeta = meta
+        }
         setAdvanced(itemStack, advanced)
         val defaultTier = Tiers.getByID(slotConfig.getString("defaultTier"))
         if (defaultTier == null) {
