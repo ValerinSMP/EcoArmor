@@ -1,6 +1,7 @@
 package com.willfp.ecoarmor.libreforge
 
 import com.willfp.eco.core.config.interfaces.Config
+import com.willfp.ecoarmor.sets.ArmorSets
 import com.willfp.ecoarmor.sets.ArmorUtils
 import com.willfp.libreforge.ArgType
 import com.willfp.libreforge.Dispatcher
@@ -23,6 +24,7 @@ object ConditionIsWearingSet : Condition<NoCompileData>("is_wearing_set") {
             description = "The ID of the armor set the entity must be wearing.",
             type = ArgType.STRING
         )
+        optional("amount", description = "Number of set pieces, including count_toward_set.", type = ArgType.INT)
         optional(
             "advanced",
             description = "If specified, also requires the worn set to be in its advanced (or non-advanced) form to match this value.",
@@ -38,7 +40,10 @@ object ConditionIsWearingSet : Condition<NoCompileData>("is_wearing_set") {
     ): Boolean {
         val entity = dispatcher.get<LivingEntity>() ?: return false
 
-        if (ArmorUtils.getSetOnEntity(entity)?.id != config.getString("set")) {
+        val set = ArmorSets.getByID(config.getString("set")) ?: return false
+        val matches = if (config.has("amount")) (ArmorUtils.getSetCountsOnEntity(entity)[set] ?: 0) >= config.getInt("amount")
+            else ArmorUtils.getSetOnEntity(entity) == set
+        if (!matches) {
             return false
         }
 

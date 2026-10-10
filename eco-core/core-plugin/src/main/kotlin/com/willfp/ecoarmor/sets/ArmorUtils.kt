@@ -2,9 +2,11 @@ package com.willfp.ecoarmor.sets
 
 import com.willfp.ecoarmor.api.event.PlayerArmorSetEquipEvent
 import com.willfp.ecoarmor.api.event.PlayerArmorSetUnequipEvent
+import com.willfp.ecoarmor.libreforge.EffectCountTowardSet
 import com.willfp.ecoarmor.plugin
 import com.willfp.ecoarmor.sets.ArmorSlot.Companion.getSlot
 import com.willfp.ecoarmor.upgrades.Tier
+import com.willfp.ecoarmor.upgrades.TierProperties
 import com.willfp.ecoarmor.upgrades.Tiers
 import com.willfp.libreforge.isBrokenItem
 import com.willfp.libreforge.Holder
@@ -109,9 +111,9 @@ object ArmorUtils {
         // Pre-compute set lookups once for all items to avoid repeated PDC reads
         val itemSets = equipment.map { item -> item?.let { getSetOnItem(it) } }
 
-        val partialSetsWorn = countPartialSets(itemSets)
-        val fullSet = firstCompleteArmorSet(partialSetsWorn) { it.setRequirements }
-        val advanced = isWearingAdvanced(equipment, fullSet, itemSets)
+        val setCounts = countSets(itemSets, entity)
+        val fullSet = findFullSet(setCounts)
+        val advanced = isWearingAdvanced(equipment, fullSet, entity)
 
         val set = if (fullSet != null) {
             if (advanced) fullSet.advancedHolder else fullSet.regularHolder
@@ -123,7 +125,7 @@ object ArmorUtils {
             holders.add(SimpleProvidedHolder(set))
         }
 
-        for ((partialSet, count) in partialSetsWorn) {
+        for ((partialSet, count) in setCounts) {
             val suppressedByFull = fullSet != null && partialSet == fullSet && partialSet.fullSetDisablesPartialSet
             if (suppressedByFull) continue
 
@@ -208,8 +210,20 @@ object ArmorUtils {
      */
     @JvmStatic
     fun getSetOnEntity(entity: LivingEntity): ArmorSet? {
-        val equipment = entity.equipment?.armorContents?.toList()?.map { if (it.isBrokenItem) null else it } ?: return null
-        return getSetOn(equipment)
+        return findFullSet(getSetCountsOnEntity(entity))
+    }
+
+    /**
+     * Get the number of pieces of each set an entity counts as wearing,
+     * including pieces given by the count_toward_set effect.
+     *
+     * @param entity The entity to check.
+     * @return A map of sets to their piece count.
+     */
+    @JvmStatic
+    fun getSetCountsOnEntity(entity: LivingEntity): Map<ArmorSet, Int> {
+        val equipment = entity.equipment?.armorContents?.toList()?.map { if (it.isBrokenItem) null else it } ?: emptyList()
+        return countSets(equipment.map { item -> item?.let { getSetOnItem(it) } }, entity)
     }
 
     /**
@@ -228,14 +242,11 @@ object ArmorUtils {
             val set = getSetOnItem(itemStack) ?: continue
             found.add(set)
         }
-        return findFullSet(found)
+        return findFullSet(found.groupingBy { it }.eachCount())
     }
 
-    private fun findFullSet(found: List<ArmorSet>): ArmorSet? {
-        if (found.isEmpty()) return null
-        val grouped = found.groupingBy { it }.eachCount()
-        return firstCompleteArmorSet(grouped) { it.setRequirements }
-    }
+    private fun findFullSet(setCounts: Map<ArmorSet, Int>): ArmorSet? =
+        firstCompleteArmorSet(setCounts) { it.setRequirements }
 
     /**
      * Get all armor sets that player is wearing a partial set of, paired with the amount they are wearing.
@@ -256,12 +267,14 @@ object ArmorUtils {
     }
 
     /**
-     * Get partial sets from pre-computed per-item set lookups.
+     * Count pre-computed per-item set lookups, plus pieces given by the count_toward_set effect.
      */
-    private fun countPartialSets(itemSets: List<ArmorSet?>): Map<ArmorSet, Int> {
-        val found = itemSets.filterNotNull()
-        if (found.isEmpty()) return emptyMap()
-        return found.groupingBy { it }.eachCount()
+    private fun countSets(itemSets: List<ArmorSet?>, entity: LivingEntity): Map<ArmorSet, Int> {
+        val setCounts = itemSets.filterNotNull().groupingBy { it }.eachCountTo(mutableMapOf())
+        for ((set, amount) in EffectCountTowardSet.getExtraPieces(entity)) {
+            setCounts.merge(set, amount, Int::plus)
+        }
+        return setCounts
     }
 
     /**
@@ -298,6 +311,60 @@ object ArmorUtils {
                 )
             )
         } else null
+    }
+
+    /**
+     * Get the ids of every tier currently applied to an item, oldest first.
+     *
+     * For an item whose current tier is non-additive, this is a single-element
+     * list matching [getTier]. For an item with additive tiers stacked, this
+     * lists every tier applied so far, in application order (may contain
+     * duplicates if the same additive tier was stacked more than once).
+     *
+     * @param meta The item to check.
+     * @return The applied tier ids.
+     */
+    @JvmStatic
+    fun getAppliedTierIds(meta: ItemMeta): List<String> {
+        val stacked = meta.persistentDataContainer.get(
+            plugin.namespacedKeyFactory.create("tiers"),
+            PersistentDataType.STRING
+        )
+        if (stacked != null) {
+            return stacked.split(",").filter { it.isNotBlank() }
+        }
+        val single = meta.persistentDataContainer.get(
+            plugin.namespacedKeyFactory.create("tier"),
+            PersistentDataType.STRING
+        )
+        return if (single != null) listOf(single) else emptyList()
+    }
+
+    /**
+     * Get every tier currently applied to an item, oldest first.
+     *
+     * @param meta The item to check.
+     * @return The applied tiers.
+     */
+    @JvmStatic
+    fun getAppliedTiers(meta: ItemMeta): List<Tier> {
+        return getAppliedTierIds(meta).mapNotNull { Tiers.getByID(it) }
+    }
+
+    /**
+     * Check whether an additive tier can still be applied to an item without
+     * exceeding its [Tier.stackLimit].
+     *
+     * @param itemStack The item to check.
+     * @param tier The additive tier being applied.
+     * @return True if applying would not exceed the tier's stack limit.
+     */
+    @JvmStatic
+    fun canApplyAdditiveTier(itemStack: ItemStack, tier: Tier): Boolean {
+        val meta = itemStack.itemMeta ?: return false
+        if (tier.stackLimit < 0) return true
+        val applied = getAppliedTierIds(meta).count { it == tier.id }
+        return applied < tier.stackLimit
     }
 
     /**
@@ -364,11 +431,51 @@ object ArmorUtils {
         if (effDur != null && effDur > 0 && meta is org.bukkit.inventory.meta.Damageable) {
             meta.setMaxDamage(effDur)
         }
-        setTierKey(meta, tier)
         val slot = getSlot(itemStack) ?: return
-
         val props = tier.properties[slot] ?: return
 
+        if (tier.additive) {
+            if (!canApplyAdditiveTier(itemStack, tier)) return
+
+            val existingIds = getAppliedTierIds(meta).toMutableList()
+            existingIds.add(tier.id)
+
+            setTierKey(meta, tier)
+            meta.persistentDataContainer.set(
+                plugin.namespacedKeyFactory.create("tiers"),
+                PersistentDataType.STRING,
+                existingIds.joinToString(",")
+            )
+
+            removeAllTierAttributeModifiers(meta)
+
+            val combinedProps = sumProperties(
+                existingIds.mapNotNull { Tiers.getByID(it) }.mapNotNull { it.properties[slot] }
+            )
+
+            addTierModifiers(meta, slot, combinedProps)
+
+            itemStack.itemMeta = meta
+            return
+        }
+
+        meta.persistentDataContainer.remove(plugin.namespacedKeyFactory.create("tiers"))
+        setTierKey(meta, tier)
+
+        removeAllTierAttributeModifiers(meta)
+
+        addTierModifiers(meta, slot, props)
+
+        itemStack.itemMeta = meta
+    }
+
+    /**
+     * Remove every attribute modifier this plugin may have added for a tier,
+     * so stats can be recalculated from scratch.
+     *
+     * @param meta The meta to mutate.
+     */
+    private fun removeAllTierAttributeModifiers(meta: ItemMeta) {
         meta.removeAttributeModifier(Attribute.ARMOR)
         meta.removeAttributeModifier(Attribute.ARMOR_TOUGHNESS)
         meta.removeAttributeModifier(Attribute.KNOCKBACK_RESISTANCE)
@@ -386,7 +493,59 @@ object ArmorUtils {
         meta.removeAttributeModifier(Attribute.SAFE_FALL_DISTANCE)
         meta.removeAttributeModifier(Attribute.ENTITY_INTERACTION_RANGE)
         meta.removeAttributeModifier(Attribute.BLOCK_INTERACTION_RANGE)
+    }
 
+    /**
+     * Sum a list of tier stat blocks into a single combined stat block, treating
+     * unset fields as 0. Used so stacked additive tiers show one recalculated
+     * attribute modifier per attribute instead of one per application.
+     *
+     * @param propsList The stat blocks to combine.
+     * @return The combined stat block.
+     */
+    private fun sumProperties(propsList: List<TierProperties>): TierProperties {
+        fun sum(selector: (TierProperties) -> Int?) = propsList.sumOf { selector(it) ?: 0 }
+
+        return TierProperties(
+            armor = sum { it.armor },
+            toughness = sum { it.toughness },
+            knockbackResistance = sum { it.knockbackResistance },
+            speedPercentage = sum { it.speedPercentage },
+            attackSpeedPercentage = sum { it.attackSpeedPercentage },
+            attackDamagePercentage = sum { it.attackDamagePercentage },
+            attackKnockbackPercentage = sum { it.attackKnockbackPercentage },
+            maxHealth = sum { it.maxHealth },
+            attackDamageFlat = sum { it.attackDamageFlat },
+            attackSpeedFlat = sum { it.attackSpeedFlat },
+            jumpStrength = sum { it.jumpStrength },
+            gravityPercentage = sum { it.gravityPercentage },
+            burningTimePercentage = sum { it.burningTimePercentage },
+            explosionKnockbackResistance = sum { it.explosionKnockbackResistance },
+            oxygenBonus = sum { it.oxygenBonus },
+            movementEfficiency = sum { it.movementEfficiency },
+            safeFallDistance = sum { it.safeFallDistance },
+            entityInteractionRangePercentage = sum { it.entityInteractionRangePercentage },
+            blockInteractionRangePercentage = sum { it.blockInteractionRangePercentage }
+        )
+    }
+
+    /**
+     * Attach a tier's attribute modifiers to an item's meta.
+     *
+     * Modifier keys are per-attribute-per-slot only (not per-tier), so callers
+     * must pass the already-combined stat block for every tier applied to the
+     * item, and clear any previous modifiers first via
+     * [removeAllTierAttributeModifiers].
+     *
+     * @param meta The meta to mutate.
+     * @param slot The armor slot the item occupies.
+     * @param props The combined stat block for that slot.
+     */
+    private fun addTierModifiers(
+        meta: ItemMeta,
+        slot: ArmorSlot,
+        props: TierProperties
+    ) {
         val slotGroup = when (slot.slot) {
             org.bukkit.inventory.EquipmentSlot.HEAD -> EquipmentSlotGroup.HEAD
             org.bukkit.inventory.EquipmentSlot.CHEST -> EquipmentSlotGroup.CHEST
@@ -441,8 +600,6 @@ object ArmorUtils {
         val fracScaler: (Int) -> Double = { it / 100.0 }
         addModifier(Attribute.KNOCKBACK_RESISTANCE, props.knockbackResistance, AttributeModifier.Operation.ADD_NUMBER, "", fracScaler)
         addModifier(Attribute.EXPLOSION_KNOCKBACK_RESISTANCE, props.explosionKnockbackResistance, AttributeModifier.Operation.ADD_NUMBER, "", fracScaler)
-
-        itemStack.itemMeta = meta
     }
 
     /**
@@ -480,7 +637,7 @@ object ArmorUtils {
     @JvmStatic
     fun isWearingAdvanced(entity: LivingEntity): Boolean {
         val equipment = entity.equipment?.armorContents?.toList() ?: return false
-        return isWearingAdvanced(equipment)
+        return isWearingAdvanced(equipment, getSetOnEntity(entity), entity)
     }
 
     /**
@@ -507,14 +664,24 @@ object ArmorUtils {
 
     /**
      * Check advanced status using pre-computed full set and item list (avoids redundant PDC reads).
+     *
+     * When the count_toward_set effect gives pieces of the full set, empty armor slots are allowed,
+     * and only advanced pieces count towards the set requirement.
      */
-    private fun isWearingAdvanced(items: List<ItemStack?>, fullSet: ArmorSet?, itemSets: List<ArmorSet?>): Boolean {
+    private fun isWearingAdvanced(items: List<ItemStack?>, fullSet: ArmorSet?, entity: LivingEntity): Boolean {
         if (fullSet == null) return false
-        for (itemStack in items) {
-            if (itemStack == null) return false
-            if (!isAdvanced(itemStack)) return false
+
+        if (fullSet !in EffectCountTowardSet.getExtraPieces(entity)) {
+            return items.all { it != null && isAdvanced(it) }
         }
-        return true
+
+        val wornItems = items.filterNotNull().filterNot { it.type.isAir }
+        if (!wornItems.all { isAdvanced(it) }) return false
+
+        val advancedPieces = wornItems.count { getSetOnItem(it) == fullSet } +
+                (EffectCountTowardSet.getExtraPieces(entity, advancedOnly = true)[fullSet] ?: 0)
+
+        return advancedPieces >= fullSet.setRequirements
     }
 
     /**

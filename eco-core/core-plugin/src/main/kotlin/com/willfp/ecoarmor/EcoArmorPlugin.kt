@@ -15,6 +15,8 @@ import com.willfp.ecoarmor.sets.PreventSkullPlaceListener
 import com.willfp.ecoarmor.upgrades.AdvancementShardListener
 import com.willfp.ecoarmor.upgrades.CrystalListener
 import com.willfp.ecoarmor.upgrades.TierArgParser
+import com.willfp.ecoarmor.libreforge.EffectCountTowardSet
+import com.willfp.libreforge.effects.Effects
 import com.willfp.ecoarmor.upgrades.Tiers
 import com.willfp.ecoarmor.util.DiscoverRecipeListener
 import com.willfp.ecoarmor.libreforge.FilterArmorSet
@@ -43,6 +45,7 @@ class EcoArmorPlugin : LibreforgePlugin() {
         Conditions.register(ConditionIsWearingSet)
         Triggers.register(TriggerAdvanceArmor)
         Triggers.register(TriggerUpgradeArmorTier)
+        Effects.register(EffectCountTowardSet)
         Filters.register(FilterArmorSet)
         Filters.register(FilterArmorTier)
     }

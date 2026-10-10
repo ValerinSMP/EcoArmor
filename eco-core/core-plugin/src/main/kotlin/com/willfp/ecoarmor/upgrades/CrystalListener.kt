@@ -42,6 +42,8 @@ object CrystalListener : Listener {
             return
         }
         val player = event.whoClicked as? Player ?: return
+        if (crystalTier.additive && !ArmorUtils.canApplyAdditiveTier(current, crystalTier)) return
+
         val tierEvent = ArmorTierEvent(player, current, crystalTier, previousTier)
         Bukkit.getPluginManager().callEvent(tierEvent)
         if (tierEvent.isCancelled) {
